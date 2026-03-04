@@ -39,12 +39,23 @@ export async function getProjectById(projectId: string, requesterId?: string) {
           createdAt: true,
         },
       },
+      collaborators: {
+        include: {
+          user: { select: { id: true, username: true, avatarUrl: true } },
+        },
+      },
     },
   });
 
   if (!project) throw new NotFoundError("Project");
+
   if (!project.isPublic && project.ownerId !== requesterId) {
-    throw new ForbiddenError("This project is private");
+    const isCollaborator = project.collaborators.some(
+      (c) => c.userId === requesterId
+    );
+    if (!isCollaborator) {
+      throw new ForbiddenError("This project is private");
+    }
   }
 
   return project;
@@ -147,10 +158,17 @@ export async function uploadFiles(
 ) {
   const project = await prisma.project.findUnique({
     where: { id: projectId },
+    include: { collaborators: true },
   });
 
   if (!project) throw new NotFoundError("Project");
-  if (project.ownerId !== userId) throw new ForbiddenError();
+
+  if (project.ownerId !== userId) {
+    const isEditor = project.collaborators.some(
+      (c) => c.userId === userId && c.role === "editor"
+    );
+    if (!isEditor) throw new ForbiddenError();
+  }
 
   const uploadedFiles = await Promise.all(
     files.map(async (file) => {
@@ -188,12 +206,18 @@ export async function getFileDownloadUrl(
 ) {
   const file = await prisma.projectFile.findUnique({
     where: { id: fileId },
-    include: { project: true },
+    include: { project: { include: { collaborators: true } } },
   });
 
   if (!file) throw new NotFoundError("File");
+
   if (!file.project.isPublic && file.project.ownerId !== requesterId) {
-    throw new ForbiddenError("This file belongs to a private project");
+    const isCollaborator = file.project.collaborators.some(
+      (c) => c.userId === requesterId
+    );
+    if (!isCollaborator) {
+      throw new ForbiddenError("This file belongs to a private project");
+    }
   }
 
   const url = await getDownloadUrl(file.s3Key);
