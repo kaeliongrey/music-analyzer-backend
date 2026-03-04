@@ -1,7 +1,7 @@
 import { NotFoundError, ForbiddenError } from "../../utils/errors";
 
 // ---------------------------------------------------------------------------
-// Mocks – declared before the module under test is imported
+// Mocks -- declared before the module under test is imported
 // ---------------------------------------------------------------------------
 
 const mockPrismaProject = {
@@ -38,7 +38,7 @@ jest.mock("../../services/storageService", () => ({
 }));
 
 // env mock (not directly used by projectService, but storageService references
-// it – our mock replaces storageService entirely so this is just precautionary)
+// it -- our mock replaces storageService entirely so this is just precautionary)
 jest.mock("../../config/env", () => ({
   env: {
     aws: { bucketName: "test-bucket", region: "us-east-1" },
@@ -76,6 +76,7 @@ function makeProject(overrides: Record<string, unknown> = {}) {
     createdAt: new Date("2025-03-01"),
     updatedAt: new Date("2025-03-01"),
     files: [],
+    collaborators: [],
     owner: { id: "owner-1", username: "producer1" },
     ...overrides,
   };
@@ -172,6 +173,11 @@ describe("projectService", () => {
               createdAt: true,
             },
           },
+          collaborators: {
+            include: {
+              user: { select: { id: true, username: true, avatarUrl: true } },
+            },
+          },
         },
       });
       expect(result).toEqual(project);
@@ -197,8 +203,12 @@ describe("projectService", () => {
       );
     });
 
-    it("should throw ForbiddenError for private project if requester is not owner", async () => {
-      const project = makeProject({ isPublic: false, ownerId: "owner-1" });
+    it("should throw ForbiddenError for private project if requester is not owner and not collaborator", async () => {
+      const project = makeProject({
+        isPublic: false,
+        ownerId: "owner-1",
+        collaborators: [],
+      });
       mockPrismaProject.findUnique.mockResolvedValue(project);
 
       await expect(
@@ -211,6 +221,21 @@ describe("projectService", () => {
       mockPrismaProject.findUnique.mockResolvedValue(project);
 
       const result = await getProjectById("project-1", "owner-1");
+
+      expect(result).toEqual(project);
+    });
+
+    it("should allow a collaborator to view a private project", async () => {
+      const project = makeProject({
+        isPublic: false,
+        ownerId: "owner-1",
+        collaborators: [
+          { userId: "collab-user", role: "viewer", user: { id: "collab-user", username: "collab" } },
+        ],
+      });
+      mockPrismaProject.findUnique.mockResolvedValue(project);
+
+      const result = await getProjectById("project-1", "collab-user");
 
       expect(result).toEqual(project);
     });
@@ -385,6 +410,7 @@ describe("projectService", () => {
 
       expect(mockPrismaProject.findUnique).toHaveBeenCalledWith({
         where: { id: "project-1" },
+        include: { collaborators: true },
       });
       expect(mockUploadToS3).toHaveBeenCalledWith(file, "project-1");
       expect(mockPrismaProjectFile.create).toHaveBeenCalledWith({
@@ -494,8 +520,13 @@ describe("projectService", () => {
       ).rejects.toThrow(NotFoundError);
     });
 
-    it("should throw ForbiddenError when user is not the project owner", async () => {
-      const project = makeProject({ ownerId: "owner-1" });
+    it("should throw ForbiddenError when user is not the owner and not an editor collaborator", async () => {
+      const project = makeProject({
+        ownerId: "owner-1",
+        collaborators: [
+          { userId: "viewer-user", role: "viewer" },
+        ],
+      });
       mockPrismaProject.findUnique.mockResolvedValue(project);
 
       await expect(
@@ -503,6 +534,44 @@ describe("projectService", () => {
       ).rejects.toThrow(ForbiddenError);
 
       // Should not attempt S3 upload
+      expect(mockUploadToS3).not.toHaveBeenCalled();
+    });
+
+    it("should allow an editor collaborator to upload files", async () => {
+      const project = makeProject({
+        ownerId: "owner-1",
+        collaborators: [
+          { userId: "editor-user", role: "editor" },
+        ],
+      });
+      mockPrismaProject.findUnique.mockResolvedValue(project);
+
+      const file = makeMulterFile({
+        originalname: "collab-track.wav",
+        filename: "collab-track.wav",
+      });
+      mockUploadToS3.mockResolvedValue({ s3Key: "projects/project-1/collab.wav" });
+      mockPrismaProjectFile.create.mockResolvedValue({ id: "file-collab" });
+
+      const result = await uploadFiles("project-1", "editor-user", [file], "stem");
+
+      expect(mockUploadToS3).toHaveBeenCalledWith(file, "project-1");
+      expect(result).toHaveLength(1);
+    });
+
+    it("should reject a viewer collaborator from uploading files", async () => {
+      const project = makeProject({
+        ownerId: "owner-1",
+        collaborators: [
+          { userId: "viewer-user", role: "viewer" },
+        ],
+      });
+      mockPrismaProject.findUnique.mockResolvedValue(project);
+
+      await expect(
+        uploadFiles("project-1", "viewer-user", [makeMulterFile()], "sample")
+      ).rejects.toThrow(ForbiddenError);
+
       expect(mockUploadToS3).not.toHaveBeenCalled();
     });
   });
